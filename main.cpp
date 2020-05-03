@@ -59,7 +59,16 @@ Mat_<double> convertToFrequencyUsingFDCT(Mat_<int> img) {
 	return C;
 }
 
-Mat_<int> applyQuantization(Mat_<double> src, Mat_<int> quantization) {
+Mat_<int> applyQuantization(Mat_<double> src) {
+	int quantizationVals[] = { 16, 11, 10, 16, 24, 40, 51, 61,
+						  12, 12, 14, 19, 26, 58, 60, 55,
+						  14, 13, 16, 24, 40, 57, 69, 56,
+						  14, 17, 22, 29, 51, 87, 80, 62,
+						  18, 22, 37, 56, 68, 109, 103, 77,
+						  24, 35, 55, 64, 81, 104, 113, 92,
+						  49, 64, 78, 87, 103, 121, 120, 101,
+						  72, 92, 95, 98, 112, 100, 103, 99 };
+	Mat_<int> quantization(BLOCK_SIZE, BLOCK_SIZE, quantizationVals);
 	Mat_<int> dst(src.rows, src.cols);
 
 	for(int i = 0; i < src.rows; i++)
@@ -90,6 +99,28 @@ vector<int> zigZagTraversal(Mat_<int> src) {
 	}
 
 	return res;
+}
+
+vector<pair<int, int>> runLengthEncode(vector<int> vals) {
+	vector<pair<int, int>> res;
+	int i = 0;
+	while (i < vals.size()) {
+		int zeroesCount = 0;
+		while (i < vals.size() - 1 && vals[i] == 0) {
+			zeroesCount++;
+			i++;
+		}
+
+		if (i == vals.size() - 1 && vals[i++] == 0)   //the rest is 0
+			res.push_back(pair<int, int>(0, 0));
+		else res.push_back(pair<int, int>(zeroesCount, vals[i++]));
+	}
+
+	return res;
+}
+
+void huffmanCode() {
+
 }
 
 int main()
@@ -141,24 +172,20 @@ int main()
 
 	Mat_<double> rez = convertToFrequencyUsingFDCT(Y);
 	cout << rez;
-	int quantizationVals[] = {16, 11, 10, 16, 24, 40, 51, 61,
-							  12, 12, 14, 19, 26, 58, 60, 55,
-							  14, 13, 16, 24, 40, 57, 69, 56,
-							  14, 17, 22, 29, 51, 87, 80, 62,
-							  18, 22, 37, 56, 68, 109, 103, 77,
-							  24, 35, 55, 64, 81, 104, 113, 92,
-							  49, 64, 78, 87, 103, 121, 120, 101,
-							  72, 92, 95, 98, 112, 100, 103, 99};
-	Mat_<int> quantization(BLOCK_SIZE, BLOCK_SIZE, quantizationVals);
-	Mat_<int> q = applyQuantization(rez, quantization);
+
+	Mat_<int> q = applyQuantization(rez);
 
 	cout << endl;
-	cout << q << endl;
+	cout << q << endl << endl;
 
 	vector<int> rr =  zigZagTraversal(q);
 	for (int i = 0; i < rr.size(); i++)
 		cout << rr[i] << " ";
 
+	cout << endl << endl;
+	vector<pair<int, int>> res1 = runLengthEncode(rr);
+	for (int i = 0; i < res1.size(); i++)
+		cout << res1[i].first << ", " << res1[i].second << endl;
 	////TODO - dct
 	//imshow("original", src);
 	//imshow("Y", Y);
