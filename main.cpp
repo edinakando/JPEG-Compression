@@ -6,6 +6,16 @@ using namespace std;
 
 #define BLOCK_SIZE 8
 
+int quantizationVals[] = { 16, 11, 10, 16, 24, 40, 51, 61,
+						  12, 12, 14, 19, 26, 58, 60, 55,
+						  14, 13, 16, 24, 40, 57, 69, 56,
+						  14, 17, 22, 29, 51, 87, 80, 62,
+						  18, 22, 37, 56, 68, 109, 103, 77,
+						  24, 35, 55, 64, 81, 104, 113, 92,
+						  49, 64, 78, 87, 103, 121, 120, 101,
+						  72, 92, 95, 98, 112, 100, 103, 99 };
+Mat_<int> quantization(BLOCK_SIZE, BLOCK_SIZE, quantizationVals);
+
 Mat openImage() {
 	char fname[MAX_PATH];
 	openFileDlg(fname);
@@ -22,12 +32,11 @@ void encodePixels(vector<Mat_<Vec3b>> pixels) {
 
 vector<Mat_<int>> getDivisionInBlocks(Mat_<uchar> img) {
 	vector<Mat_<int>> pixels;
-	Mat_<int> normalizedImg = img.clone();
-	normalizedImg -= 128; 	//center around 0
-	for (int i = 0; i < normalizedImg.rows; i += BLOCK_SIZE)
-		for (int j = 0; j < normalizedImg.cols; j += BLOCK_SIZE) {
+
+	for (int i = 0; i < img.rows; i += BLOCK_SIZE)
+		for (int j = 0; j < img.cols; j += BLOCK_SIZE) {
 			cv::Rect rectangle = cv::Rect(i, j, BLOCK_SIZE, BLOCK_SIZE);
-			pixels.push_back(cv::Mat_<Vec3b>(normalizedImg, rectangle));
+			pixels.push_back(cv::Mat_<Vec3b>(img, rectangle));
 		}
 
 	return pixels;
@@ -39,41 +48,60 @@ double alpha(int i) {
 	return sqrt(2.0 / 8);
 }
 
-Mat_<double> convertToFrequencyUsingFDCT(Mat_<int> img) {
+Mat_<double> applyFDCT(Mat_<int> img) {
 	Mat_<double> C(img.rows, img.cols);
+	img -= 128; //center around 0
 
-	for(int u = 0; u < img.rows; u++)
-		for (int v = 0; v < img.cols; v++) {
+	for(int i = 0; i < img.rows; i++)
+		for (int j = 0; j < img.cols; j++) {
 			double sum = 0;
 			for (double x = 0; x < BLOCK_SIZE; x++)
 				for (double y = 0; y < BLOCK_SIZE; y++)
-					sum += img(x, y) * cos(PI * (2 * x + 1) * u / (2 * BLOCK_SIZE))
-									 * cos(PI * (2 * y + 1) * v / (2 * BLOCK_SIZE));
+					sum += img(x, y) * cos(PI * (2 * x + 1) * i / (2 * BLOCK_SIZE))
+									 * cos(PI * (2 * y + 1) * j / (2 * BLOCK_SIZE));
 
-			C(u, v) = alpha(u) * alpha(v) * sum;
-			double a = alpha(u);
-			double b = C(u, v);
-			int c = 5;
+			C(i, j) = alpha(i) * alpha(j) * sum;
 		}
 
 	return C;
 }
 
+Mat_<uchar> applyIDCT(Mat_<int> img) {
+	Mat_<int> V(img.rows, img.cols);
+
+	for(int i = 0; i < img.rows; i++)
+		for (int j = 0; j < img.cols; j++) {
+			double sum = 0;
+			for (double x = 0; x < BLOCK_SIZE; x++)
+				for (double y = 0; y < BLOCK_SIZE; y++)
+					sum += img(x, y) * cos(PI * (2 * y + 1) * i / (2 * BLOCK_SIZE))
+									 * cos(PI * (2 * x + 1) * j / (2 * BLOCK_SIZE));
+
+			V(i, j) = round(alpha(i) * alpha(j) * sum);
+		}
+
+	V += 128;
+	Mat_<uchar> result = V.clone();
+	return result;
+}
+
 Mat_<int> applyQuantization(Mat_<double> src) {
-	int quantizationVals[] = { 16, 11, 10, 16, 24, 40, 51, 61,
-						  12, 12, 14, 19, 26, 58, 60, 55,
-						  14, 13, 16, 24, 40, 57, 69, 56,
-						  14, 17, 22, 29, 51, 87, 80, 62,
-						  18, 22, 37, 56, 68, 109, 103, 77,
-						  24, 35, 55, 64, 81, 104, 113, 92,
-						  49, 64, 78, 87, 103, 121, 120, 101,
-						  72, 92, 95, 98, 112, 100, 103, 99 };
-	Mat_<int> quantization(BLOCK_SIZE, BLOCK_SIZE, quantizationVals);
 	Mat_<int> dst(src.rows, src.cols);
 
 	for(int i = 0; i < src.rows; i++)
 		for (int j = 0; j < src.cols; j++) 
 			dst(i, j) = round(src(i, j) / quantization(i, j));
+
+	return dst;
+}
+
+
+Mat_<int> applyDequantization(Mat_<int> src) {
+	Mat_<int> dst(src.rows, src.cols);
+
+	for (int i = 0; i < src.rows; i++)
+		for (int j = 0; j < src.cols; j++)
+			dst(i, j) = src(i, j) * quantization(i, j);
 
 	return dst;
 }
@@ -123,8 +151,44 @@ void huffmanCode() {
 
 }
 
+vector<vector<pair<int, int>>> compressImage(Mat_<Vec3b> src) {
+	Mat_<uchar> Y(src.rows, src.cols), Cr(src.rows, src.cols), Cb(src.rows, src.cols);
+	Mat_<Vec3b> dst(src.rows, src.cols);
+
+	cvtColor(src, dst, COLOR_BGR2YCrCb);
+	vector<Mat> channels;
+	split(dst, channels);
+	Y = channels[0];
+	Cr = channels[1];
+	Cb = channels[2];
+
+	vector<Mat_<int>> yBlocks = getDivisionInBlocks(Y);
+
+	vector<vector<pair<int, int>>> RLEs;
+	for (Mat_<uchar> block : yBlocks) {
+		Mat_<double> dct = applyFDCT(block);
+		Mat_<int> quantized = applyQuantization(dct);
+		vector<int> zigZag = zigZagTraversal(quantized);
+		RLEs.push_back(runLengthEncode(zigZag));
+	}
+
+	//todo: huffman?
+
+	return RLEs;
+}
+
+Mat_<uchar> decompress(Mat_<int> quantization) {
+	//todo: get quantized val from huffman encoding
+	Mat_<int> deq = applyDequantization(quantization);
+	Mat_<uchar> decompressedImage = applyIDCT(deq);
+	return decompressedImage;
+}
+
+
 int main()
 {
+	/*Mat_<Vec3b> src = openImage();
+	compressImage(src);*/
 
 	/*int vals[] = { 64, 56, 56, 57, 70, 84, 84, 59,
 				  66, 64, 35, 36, 87, 45, 21, 58,
@@ -135,7 +199,7 @@ int main()
 				  62, 59, 68, 113, 144, 104, 66, 73,
 				  107, 121, 89, 21, 35, 64, 65, 65 };*/
 
-	//Mat_<Vec3b> src = openImage();
+	
 	//Mat_<Vec3b> dst(src.rows, src.cols);
 	//Mat_<uchar> Y(src.rows, src.cols), Cr(src.rows, src.cols), Cb(src.rows, src.cols);
 
@@ -167,26 +231,33 @@ int main()
 				  85, 71, 64, 59, 55, 61, 65, 83,
 				  87, 79, 69, 68, 65, 76, 78, 94 };
 	Mat_<int> Y(8, 8, vals);
-	Y -= 128;
-	cout << Y << endl;
+	cout << "Original:\n" << Y << endl << endl;
+	cout <<  "Normalized around 0:\n " << Y << endl << endl;
 
-	Mat_<double> rez = convertToFrequencyUsingFDCT(Y);
-	cout << rez;
+	Mat_<double> rez = applyFDCT(Y);
+	cout << "FDCT:\n" << rez << endl << endl;
 
 	Mat_<int> q = applyQuantization(rez);
+	cout << "Quantized:\n" << q << endl << endl;
 
-	cout << endl;
-	cout << q << endl << endl;
+	//vector<int> rr = zigZagTraversal(q);
+	//cout << "ZigZag: \n";
+	//for (int i = 0; i < rr.size(); i++)
+	//	cout << rr[i] << " ";
+	//cout << endl << endl;
 
-	vector<int> rr =  zigZagTraversal(q);
-	for (int i = 0; i < rr.size(); i++)
-		cout << rr[i] << " ";
+	//cout << "RLE:\n";
+	//vector<pair<int, int>> res1 = runLengthEncode(rr);
+	//for (int i = 0; i < res1.size(); i++)
+	//	cout << res1[i].first << ", " << res1[i].second << endl;
+	//cout << endl << endl;
 
-	cout << endl << endl;
-	vector<pair<int, int>> res1 = runLengthEncode(rr);
-	for (int i = 0; i < res1.size(); i++)
-		cout << res1[i].first << ", " << res1[i].second << endl;
-	////TODO - dct
+	Mat_<int> deq = applyDequantization(q);
+	cout << "Dequantized: \n"  << deq << endl << endl;
+
+	Mat_<double> ddd = applyIDCT(deq);
+	cout << "IDCT:\n" <<  ddd << endl << endl;
+
 	//imshow("original", src);
 	//imshow("Y", Y);
 	//imshow("Cr", Cr);
