@@ -6,6 +6,9 @@ using namespace std;
 
 #define BLOCK_SIZE 8
 
+//TODO: pad images if it can't be split into 8x8 images
+//TODO: correct the split into smaller pixels => correct loss
+
 int imgRows, imgCols;
 
 int quantizationVals[] = { 16, 11, 10, 16, 24, 40, 51, 61,
@@ -33,8 +36,8 @@ Mat openImage() {
 vector<Mat_<int>> getDivisionInBlocks(Mat_<uchar> img) {
 	vector<Mat_<int>> pixels;
 
-	for (int i = 0; i < img.rows; i += BLOCK_SIZE)
-		for (int j = 0; j < img.cols; j += BLOCK_SIZE) {
+	for (int i = 0; i < img.rows; i += BLOCK_SIZE / 2)
+		for (int j = 0; j < img.cols; j += BLOCK_SIZE / 2) {
 			Mat_<uchar> block(BLOCK_SIZE, BLOCK_SIZE);
 
 			for(int u = 0; u < BLOCK_SIZE; u++)
@@ -105,7 +108,6 @@ Mat_<int> applyQuantization(Mat_<double> src) {
 	return dst;
 }
 
-
 Mat_<int> applyDequantization(Mat_<int> src) {
 	Mat_<int> dst(src.rows, src.cols);
 
@@ -163,75 +165,77 @@ Mat_<int> reconstructZigZagTraversal(vector<int> traversal) {
 	return original;
 }
 
-vector<pair<int, int>> runLengthEncode(vector<int> vals) {
-	vector<pair<int, int>> res;
+vector<int> runLengthEncode(vector<int> vals) {
+	vector<int> rle;
 	int i = 0;
 	while (i < vals.size()) {
 		int zeroesCount = 0;
-		while (i < vals.size() - 1 && vals[i] == 0) {
+		while (i < vals.size() && vals[i] == 0) {
 			zeroesCount++;
 			i++;
 		}
 
-		if (i == vals.size() - 1 && vals[i++] == 0)   //the rest is 0
-			res.push_back(pair<int, int>(0, 0));
-		else res.push_back(pair<int, int>(zeroesCount, vals[i++]));
+		if (zeroesCount != 0) {
+			rle.push_back(0);
+			rle.push_back(zeroesCount);
+		}
+		else {
+			rle.push_back(vals[i]);
+			i++;
+		}
 	}
 
-	return res;
+	return rle;
 }
 
-void huffmanCode() {
+vector<int> decodeRunLength(vector<int> rle) {
+	vector<int> decodedRLE;
+	int i = 0; 
 
+	while (i < rle.size()) {
+		if (rle[i] == 0) {
+			decodedRLE.insert(decodedRLE.end(), rle[i + 1], rle[i]);
+			i++;
+		}
+		else decodedRLE.push_back(rle[i]);
+
+		i++;
+	}
+
+	return decodedRLE;
 }
 
-vector<vector<int>> compressImage(Mat_<Vec3b> src) {
-	Mat_<uchar> Y(src.rows, src.cols), Cr(src.rows, src.cols), Cb(src.rows, src.cols);
-	Mat_<Vec3b> dst(src.rows, src.cols);
+vector<vector<int>> compressImageComponent(Mat_<uchar> component) {
+	vector<Mat_<int>> blocks = getDivisionInBlocks(component);
 
-	cvtColor(src, dst, COLOR_BGR2YCrCb);
-	vector<Mat> channels;
-	split(dst, channels);
-	Y = channels[0];
-	Cr = channels[1];
-	Cb = channels[2];
-
-	vector<Mat_<int>> yBlocks = getDivisionInBlocks(Y);
-
-	//vector<vector<pair<int, int>>> RLEs;
-	vector<vector<int>> zigZags;
-	for (Mat_<uchar> block : yBlocks) {
+	vector<vector<int>> RLEs;
+	for (Mat_<uchar> block : blocks) {
 		Mat_<double> dct = applyFDCT(block);
 		Mat_<int> quantized = applyQuantization(dct);
 		vector<int> zigZag = zigZagTraversal(quantized);
-		//RLEs.push_back(runLengthEncode(zigZag));
-		zigZags.push_back(zigZag);
+		RLEs.push_back(runLengthEncode(zigZag));
 	}
 
-	//todo: huffman?
-
-	return zigZags;
+	return RLEs;
 }
 
-Mat_<uchar> decompressBlock(vector<int> zigZagTraversal) {
-	//todo: get quantized val from huffman encoding
+Mat_<uchar> decompressBlock(vector<int> rle) {
+	vector<int> zigZagTraversal = decodeRunLength(rle);
 	Mat_<int> quantization = reconstructZigZagTraversal(zigZagTraversal);
 	Mat_<int> deq = applyDequantization(quantization);
 	return applyIDCT(deq);
 }
 
-//temporal de test - add huffman
-Mat_<uchar> reconstructImage(vector<vector<int>> zigZagTraversals) {
+Mat_<uchar> reconstructImageComponent(vector<vector<int>> rles) {
 	Mat_<uchar> img(imgRows, imgCols);
 
 	int currentBlockIndex = 0;
-	for (int i = 0; i < img.rows; i += BLOCK_SIZE)
-		for (int j = 0; j < img.cols; j += BLOCK_SIZE) {
-			Mat_<uchar> currentBlock = decompressBlock(zigZagTraversals[currentBlockIndex++]);
+	for (int i = 0; i < img.rows; i += BLOCK_SIZE / 2)
+		for (int j = 0; j < img.cols; j += BLOCK_SIZE / 2) {
+			Mat_<uchar> currentBlock = decompressBlock(rles[currentBlockIndex++]);
 
-			for (int u = 0; u < currentBlock.rows; u++)
-				for (int v = 0; v < currentBlock.cols; v++) {
-					//todo
+			for (int u = 0; u < BLOCK_SIZE; u++)
+				for (int v = 0; v < BLOCK_SIZE; v++) {
 					int currentI = i + u;
 					int currentJ = j + v;
 
@@ -248,91 +252,38 @@ int main()
 	Mat_<Vec3b> src = openImage();
 	imgRows = src.rows;
 	imgCols = src.cols;
-	vector<vector<int>> zigZags = compressImage(src);
 
-	Mat_<uchar> Y = reconstructImage(zigZags);
-	imshow("luminance", Y);
+	cout << "Original Size: " << imgRows * imgCols * 3 << endl;
+
+	Mat_<uchar> Y(src.rows, src.cols), Cr(src.rows, src.cols), Cb(src.rows, src.cols);
+	Mat_<Vec3b> dst(src.rows, src.cols);
+
+	cvtColor(src, dst, COLOR_BGR2YCrCb);
+	Mat channels[3];
+	split(dst, channels);
+	Y = channels[0];
+	Cr = channels[1];
+	Cb = channels[2];
+	vector<vector<int>> yRLEs = compressImageComponent(Y);
+	vector<vector<int>> crRLEs = compressImageComponent(Cr);
+	vector<vector<int>> cbRLEs = compressImageComponent(Cb);
+
+	int compressedSize = imgRows * imgCols + crRLEs.size() + cbRLEs.size();
+	cout << "Compressed size: " << compressedSize << endl;
+
+	//Mat_<uchar> yReconstructed = reconstructImageComponent(yRLEs);
+	Mat_<uchar> crReconstructed = reconstructImageComponent(crRLEs);
+	Mat_<uchar> cbReconstructed = reconstructImageComponent(cbRLEs);
+
+	//channels[0] = yReconstructed;
+	channels[1] = crReconstructed;
+	channels[2] = cbReconstructed;
+
+	Mat mergedRes, finalRes;
+	merge(channels, 3, mergedRes);
+	cvtColor(mergedRes, finalRes, COLOR_YCrCb2BGR);
+
+	imshow("original", src);
+	imshow("reconstructed", finalRes);
 	waitKey();
-	//
-	///*Mat_<Vec3b> src = openImage();
-	//compressImage(src);*/
-
-	///*int vals[] = { 64, 56, 56, 57, 70, 84, 84, 59,
-	//			  66, 64, 35, 36, 87, 45, 21, 58,
-	//			  66, 66, 66, 59, 35, 87, 26, 104,
-	//			  35, 75, 76, 45, 81, 37, 34, 35,
-	//			  45, 96, 125, 107, 31, 15, 107, 90,
-	//			  88, 89, 88, 78, 64, 57, 85, 81,
-	//			  62, 59, 68, 113, 144, 104, 66, 73,
-	//			  107, 121, 89, 21, 35, 64, 65, 65 };*/
-
-	//
-	////Mat_<Vec3b> dst(src.rows, src.cols);
-	////Mat_<uchar> Y(src.rows, src.cols), Cr(src.rows, src.cols), Cb(src.rows, src.cols);
-
-	////cvtColor(src, dst, COLOR_BGR2YCrCb);
-	////vector<Mat> channels;
-	////split(dst, channels);
-	////Y = channels[0];
-	////Cr = channels[1];
-	////Cb = channels[2];
-
-	////vector<Mat_<int>> yBlocks = getDivisionInBlocks(Y);
-	////vector<Mat_<int>> crBlocks = getDivisionInBlocks(Cr);
-	////vector<Mat_<int>> cbBlocks = getDivisionInBlocks(Cb);
-
-	////vector<Mat_<double>> dct;
-	////for (Mat_<uchar> block : yBlocks)
-	////	dct.push_back(convertToFrequencyUsingFDCT(block));
-
-	//////TODO - apply to cr and cb?
-
-
-	////testing
-	//int vals[] = { 52, 55, 61, 66, 70, 61, 64, 73,
-	//			  64, 59, 55, 90, 109, 85, 69, 72,
-	//			  62, 59, 68, 113, 144, 104, 66, 73,
-	//			  63, 58, 71, 122, 154, 106, 70, 69,
-	//			  67, 61, 68, 104, 126, 88, 68, 70,
-	//			  79, 65, 60, 70, 77, 68, 58, 75,
-	//			  85, 71, 64, 59, 55, 61, 65, 83,
-	//			  87, 79, 69, 68, 65, 76, 78, 94 };
-	//Mat_<int> Y(8, 8, vals);
-	//cout << "Original:\n" << Y << endl << endl;
-	//cout <<  "Normalized around 0:\n " << Y << endl << endl;
-
-	//Mat_<double> rez = applyFDCT(Y);
-	//cout << "FDCT:\n" << rez << endl << endl;
-
-	//Mat_<int> q = applyQuantization(rez);
-	//cout << "Quantized:\n" << q << endl << endl;
-
-	//vector<int> rr = zigZagTraversal(q);
-	//cout << "ZigZag: \n";
-	//for (int i = 0; i < rr.size(); i++)
-	//	cout << rr[i] << " ";
-	//cout << endl << endl;
-
-	//Mat_<int> orig = reconstructZigZagTraversal(rr);
-	//cout << "Reconstructed:\n";
-	//cout << orig << endl << endl;
-
-	////cout << "RLE:\n";
-	////vector<pair<int, int>> res1 = runLengthEncode(rr);
-	////for (int i = 0; i < res1.size(); i++)
-	////	cout << res1[i].first << ", " << res1[i].second << endl;
-	////cout << endl << endl;
-
-	//Mat_<int> deq = applyDequantization(q);
-	//cout << "Dequantized: \n"  << deq << endl << endl;
-
-	//Mat_<double> ddd = applyIDCT(deq);
-	//cout << "IDCT:\n" <<  ddd << endl << endl;
-
-	////imshow("original", src);
-	////imshow("Y", Y);
-	////imshow("Cr", Cr);
-	////imshow("Cb", Cb);
-
-	////waitKey();
 }
