@@ -33,22 +33,27 @@ Mat openImage() {
 	return src;
 }
 
+//Mat_<Vec3b> padImage(Mat_<Vec3b> src) {
+//	Mat_<Vec3b> dst = src.clone();
+//
+//}
+
 vector<Mat_<int>> getDivisionInBlocks(Mat_<uchar> img) {
 	vector<Mat_<int>> pixels;
 
-	for (int i = 0; i < img.rows; i += BLOCK_SIZE / 2)
-		for (int j = 0; j < img.cols; j += BLOCK_SIZE / 2) {
+	for (int i = 0; i < img.rows; i += BLOCK_SIZE)
+		for (int j = 0; j < img.cols; j += BLOCK_SIZE) {
 			Mat_<uchar> block(BLOCK_SIZE, BLOCK_SIZE);
 
-			for(int u = 0; u < BLOCK_SIZE; u++)
+			for (int u = 0; u < BLOCK_SIZE; u++) {
+				int currentI = i + u;
 				for (int v = 0; v < BLOCK_SIZE; v++) {
-					int currentI = i + u;
 					int currentJ = j + v;
 
 					if (isInside(img, currentI, currentJ))
 						block(u, v) = img(currentI, currentJ);
 				}
-
+			}
 			pixels.push_back(block);
 		}
 
@@ -61,49 +66,46 @@ double alpha(int i) {
 	return sqrt(2.0 / 8);
 }
 
-Mat_<double> applyFDCT(Mat_<int> img) {
-	Mat_<double> C(img.rows, img.cols);
+Mat_<int> applyFDCT(Mat_<int> img) {
+	Mat_<int> DCT(img.rows, img.cols);
 	img -= 128; //center around 0
 
-	for(int i = 0; i < img.rows; i++)
+	// doing a DCT on every column and row of each block
+	for (int i = 0; i < img.rows; i++)
 		for (int j = 0; j < img.cols; j++) {
 			double sum = 0;
 			for (double x = 0; x < BLOCK_SIZE; x++)
 				for (double y = 0; y < BLOCK_SIZE; y++)
 					sum += img(x, y) * cos(PI * (2 * x + 1) * i / (2 * BLOCK_SIZE))
-									 * cos(PI * (2 * y + 1) * j / (2 * BLOCK_SIZE));
+					* cos(PI * (2 * y + 1) * j / (2 * BLOCK_SIZE));
 
-			C(i, j) = alpha(i) * alpha(j) * sum;
+			DCT(i, j) = alpha(i) * alpha(j) * sum;
 		}
 
-	return C;
+	return DCT;
 }
 
-Mat_<uchar> applyIDCT(Mat_<int> img) {
-	Mat_<int> V(img.rows, img.cols);
+Mat_<uchar> applyIDCT(Mat_<int> DCT) {
+	Mat_<int> IDCT(DCT.rows, DCT.cols, { 0 });
 
-	for(int i = 0; i < img.rows; i++)
-		for (int j = 0; j < img.cols; j++) {
-			double sum = 0;
-			for (double x = 0; x < BLOCK_SIZE; x++)
-				for (double y = 0; y < BLOCK_SIZE; y++)
-					sum += img(x, y) * cos(PI * (2 * y + 1) * i / (2 * BLOCK_SIZE))
-									 * cos(PI * (2 * x + 1) * j / (2 * BLOCK_SIZE));
-
-			V(i, j) = round(alpha(i) * alpha(j) * sum);
+	for (int i = 0; i < DCT.rows; i++)
+		for (int j = 0; j < DCT.cols; j++) {
+			for (int x = 0; x < BLOCK_SIZE; x++)
+				for (int y = 0; y < BLOCK_SIZE; y++)
+					IDCT(i, j) += alpha(x) * alpha(y) * DCT(x, y) * cos(PI * (2 * i + 1) * x / (2 * BLOCK_SIZE))
+					* cos(PI * (2 * j + 1) * y / (2 * BLOCK_SIZE));
 		}
 
-	V += 128;
-	Mat_<uchar> result = V.clone();
-	return result;
+	IDCT += 128;
+	return IDCT;
 }
 
-Mat_<int> applyQuantization(Mat_<double> src) {
+Mat_<int> applyQuantization(Mat_<int> src) {
 	Mat_<int> dst(src.rows, src.cols);
 
-	for(int i = 0; i < src.rows; i++)
-		for (int j = 0; j < src.cols; j++) 
-			dst(i, j) = round(src(i, j) / quantization(i, j));
+	for (int i = 0; i < src.rows; i++)
+		for (int j = 0; j < src.cols; j++)
+			dst(i, j) = round((float)src(i, j) / quantization(i, j));
 
 	return dst;
 }
@@ -113,7 +115,7 @@ Mat_<int> applyDequantization(Mat_<int> src) {
 
 	for (int i = 0; i < src.rows; i++)
 		for (int j = 0; j < src.cols; j++)
-			dst(i, j) = src(i, j) * quantization(i, j);
+			dst(i, j) = round((float)src(i, j) * quantization(i, j));
 
 	return dst;
 }
@@ -133,7 +135,7 @@ vector<int> zigZagTraversal(Mat_<int> src) {
 			int currentRow = i < src.rows ? 0 : i - src.rows + 1;
 			int currentColumn = i < src.cols ? i : src.cols - 1;
 
-			while (currentColumn >= 0 && currentRow < src.rows) 
+			while (currentColumn >= 0 && currentRow < src.rows)
 				res.push_back(src(currentRow++, currentColumn--));
 		}
 	}
@@ -190,7 +192,7 @@ vector<int> runLengthEncode(vector<int> vals) {
 
 vector<int> decodeRunLength(vector<int> rle) {
 	vector<int> decodedRLE;
-	int i = 0; 
+	int i = 0;
 
 	while (i < rle.size()) {
 		if (rle[i] == 0) {
@@ -210,7 +212,7 @@ vector<vector<int>> compressImageComponent(Mat_<uchar> component) {
 
 	vector<vector<int>> RLEs;
 	for (Mat_<uchar> block : blocks) {
-		Mat_<double> dct = applyFDCT(block);
+		Mat_<int> dct = applyFDCT(block);
 		Mat_<int> quantized = applyQuantization(dct);
 		vector<int> zigZag = zigZagTraversal(quantized);
 		RLEs.push_back(runLengthEncode(zigZag));
@@ -230,8 +232,8 @@ Mat_<uchar> reconstructImageComponent(vector<vector<int>> rles) {
 	Mat_<uchar> img(imgRows, imgCols);
 
 	int currentBlockIndex = 0;
-	for (int i = 0; i < img.rows; i += BLOCK_SIZE / 2)
-		for (int j = 0; j < img.cols; j += BLOCK_SIZE / 2) {
+	for (int i = 0; i < img.rows; i += BLOCK_SIZE)
+		for (int j = 0; j < img.cols; j += BLOCK_SIZE) {
 			Mat_<uchar> currentBlock = decompressBlock(rles[currentBlockIndex++]);
 
 			for (int u = 0; u < BLOCK_SIZE; u++)
@@ -243,7 +245,7 @@ Mat_<uchar> reconstructImageComponent(vector<vector<int>> rles) {
 						img(currentI, currentJ) = currentBlock(u, v);
 				}
 		}
-	
+
 	return img;
 }
 
@@ -271,11 +273,11 @@ int main()
 	int compressedSize = imgRows * imgCols + crRLEs.size() + cbRLEs.size();
 	cout << "Compressed size: " << compressedSize << endl;
 
-	//Mat_<uchar> yReconstructed = reconstructImageComponent(yRLEs);
+	Mat_<uchar> yReconstructed = reconstructImageComponent(yRLEs);
 	Mat_<uchar> crReconstructed = reconstructImageComponent(crRLEs);
 	Mat_<uchar> cbReconstructed = reconstructImageComponent(cbRLEs);
 
-	//channels[0] = yReconstructed;
+	channels[0] = yReconstructed;
 	channels[1] = crReconstructed;
 	channels[2] = cbReconstructed;
 
