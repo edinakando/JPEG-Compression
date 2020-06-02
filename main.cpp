@@ -7,8 +7,6 @@ using namespace std;
 
 #define BLOCK_SIZE 8
 
-//TODO: pad images if it can't be split into 8x8 images
-
 int imgRows, imgCols;
 
 int quantizationVals[] = { 16, 11, 10, 16, 24, 40, 51, 61,
@@ -83,7 +81,6 @@ Mat_<int> applyFDCT(Mat_<int> img) {
 	Mat_<int> DCT(img.rows, img.cols);
 	img -= 128; //center around 0
 
-	// doing a DCT on every column and row of each block
 	for (int i = 0; i < img.rows; i++)
 		for (int j = 0; j < img.cols; j++) {
 			double sum = 0;
@@ -114,22 +111,22 @@ Mat_<uchar> applyIDCT(Mat_<int> DCT) {
 	return IDCT;
 }
 
-Mat_<int> applyQuantization(Mat_<int> src) {
+Mat_<int> applyQuantization(Mat_<int> src, Mat_<int> quantizationTable) {
 	Mat_<int> dst(src.rows, src.cols);
 
 	for (int i = 0; i < src.rows; i++)
 		for (int j = 0; j < src.cols; j++)
-			dst(i, j) = round((float)src(i, j) / quantization(i, j));
+			dst(i, j) = round((float)src(i, j) / quantizationTable(i, j));
 
 	return dst;
 }
 
-Mat_<int> applyDequantization(Mat_<int> src) {
+Mat_<int> applyDequantization(Mat_<int> src, Mat_<int> quantizationTable) {
 	Mat_<int> dst(src.rows, src.cols);
 
 	for (int i = 0; i < src.rows; i++)
 		for (int j = 0; j < src.cols; j++)
-			dst(i, j) = round((float)src(i, j) * quantization(i, j));
+			dst(i, j) = round((float)src(i, j) * quantizationTable(i, j));
 
 	return dst;
 }
@@ -221,13 +218,13 @@ vector<int> decodeRunLength(vector<int> rle) {
 	return decodedRLE;
 }
 
-vector<vector<int>> compressImageComponent(Mat_<int> component) {
+vector<vector<int>> compressImageComponent(Mat_<int> component, Mat_<int> quantizationTable) {
 	vector<Mat_<int>> blocks = getDivisionInBlocks(component);
 
 	vector<vector<int>> RLEs;
 	for (Mat_<uchar> block : blocks) {
 		Mat_<int> dct = applyFDCT(block);
-		Mat_<int> quantized = applyQuantization(dct);
+		Mat_<int> quantized = applyQuantization(dct, quantizationTable);
 		vector<int> zigZag = zigZagTraversal(quantized);
 		RLEs.push_back(runLengthEncode(zigZag));
 	}
@@ -235,20 +232,20 @@ vector<vector<int>> compressImageComponent(Mat_<int> component) {
 	return RLEs;
 }
 
-Mat_<uchar> decompressBlock(vector<int> rle) {
+Mat_<uchar> decompressBlock(vector<int> rle, Mat_<int> quantizationTable) {
 	vector<int> zigZagTraversal = decodeRunLength(rle);
 	Mat_<int> quantization = reconstructZigZagTraversal(zigZagTraversal);
-	Mat_<int> deq = applyDequantization(quantization);
+	Mat_<int> deq = applyDequantization(quantization, quantizationTable);
 	return applyIDCT(deq);
 }
 
-Mat_<uchar> reconstructImageComponent(vector<vector<int>> rles) {
+Mat_<uchar> reconstructImageComponent(vector<vector<int>> rles, Mat_<int> quantizationTable) {
 	Mat_<uchar> img(imgRows, imgCols);
 
 	int currentBlockIndex = 0;
 	for (int i = 0; i < img.rows; i += BLOCK_SIZE)
 		for (int j = 0; j < img.cols; j += BLOCK_SIZE) {
-			Mat_<uchar> currentBlock = decompressBlock(rles[currentBlockIndex++]);
+			Mat_<uchar> currentBlock = decompressBlock(rles[currentBlockIndex++], quantizationTable);
 
 			for (int u = 0; u < BLOCK_SIZE; u++)
 				for (int v = 0; v < BLOCK_SIZE; v++) {
@@ -269,10 +266,12 @@ int main()
 	imgRows = src.rows;
 	imgCols = src.cols;
 
-	cout << "Original Size: " << imgRows * imgCols << endl;
+	int originalSize = src.rows * src.cols;
+	int compressedSize = 0;
 
 	Mat_<Vec3b> padded = padImage(src);
-	Mat_<int> Y(padded.rows, padded.cols), Cr(padded.rows, padded.cols), Cb(padded.rows, padded.cols);
+
+	Mat_<uchar> Y(padded.rows, padded.cols), Cr(padded.rows, padded.cols), Cb(padded.rows, padded.cols);
 	Mat_<Vec3b> dst(padded.rows, padded.cols);
 
 	cvtColor(padded, dst, COLOR_BGR2YCrCb);
@@ -282,9 +281,9 @@ int main()
 	Cr = channels[1];
 	Cb = channels[2];
 
-	vector<vector<int>> yRLEs = compressImageComponent(Y);
-	vector<vector<int>> crRLEs = compressImageComponent(Cr);
-	vector<vector<int>> cbRLEs = compressImageComponent(Cb);
+	vector<vector<int>> yRLEs = compressImageComponent(Y, 2 * quantization);
+	vector<vector<int>> crRLEs = compressImageComponent(Cr, 4 * quantization);
+	vector<vector<int>> cbRLEs = compressImageComponent(Cb, 4 * quantization);
 
 #pragma region FILE_WRITE
 	ofstream file;
@@ -292,23 +291,32 @@ int main()
 	file << padded.rows << " " << padded.cols << " ";
 
 	for (int i = 0; i < yRLEs.size(); i++) {
-		for (int j = 0; j < yRLEs[i].size(); j++)
+		for (int j = 0; j < yRLEs[i].size(); j++) {
 			file << yRLEs[i][j] << " ";
+			compressedSize++;
+		}
 		file << endl;
 	}
 	for (int i = 0; i < crRLEs.size(); i++) {
-		for (int j = 0; j < crRLEs[i].size(); j++)
+		for (int j = 0; j < crRLEs[i].size(); j++) {
 			file << crRLEs[i][j] << " ";
+			compressedSize++;
+		}
 		file << endl;
 	}
 	for (int i = 0; i < cbRLEs.size(); i++) {
-		for (int j = 0; j < cbRLEs[i].size(); j++)
+		for (int j = 0; j < cbRLEs[i].size(); j++) {
 			file << cbRLEs[i][j] << " ";
+			compressedSize++;
+		}
 		file << endl;
 	}
 	file.close();
 #pragma endregion
 
+	cout << "Original Size: " << originalSize << endl;
+	cout << "Compressed Size: " << compressedSize << endl;
+	cout << "Compression Ratio: " << (float) originalSize / compressedSize << endl;
 
 #pragma region FILE_READ
 	ifstream input;
@@ -350,12 +358,9 @@ int main()
 
 #pragma endregion
 
-	int compressedSize = yRLEs.size() + crRLEs.size() + cbRLEs.size();
-	cout << "Compressed size: " << compressedSize << endl;
-
-	Mat_<uchar> yReconstructed = reconstructImageComponent(yRead);
-	Mat_<uchar> crReconstructed = reconstructImageComponent(crRead);
-	Mat_<uchar> cbReconstructed = reconstructImageComponent(cbRead);
+	Mat_<uchar> yReconstructed = reconstructImageComponent(yRead, 2 * quantization);
+	Mat_<uchar> crReconstructed = reconstructImageComponent(crRead, 4 * quantization);
+	Mat_<uchar> cbReconstructed = reconstructImageComponent(cbRead, 4 * quantization);
 
 	channels[0] = yReconstructed;
 	channels[1] = crReconstructed;
@@ -367,5 +372,6 @@ int main()
 
 	imshow("original", src);
 	imshow("reconstructed", finalRes);
+
 	waitKey();
 }
