@@ -1,13 +1,13 @@
 #include "stdafx.h"
 #include "common.h"
 #include <vector>
+#include <fstream>
 
 using namespace std;
 
 #define BLOCK_SIZE 8
 
 //TODO: pad images if it can't be split into 8x8 images
-//TODO: correct the split into smaller pixels => correct loss
 
 int imgRows, imgCols;
 
@@ -33,17 +33,30 @@ Mat openImage() {
 	return src;
 }
 
-//Mat_<Vec3b> padImage(Mat_<Vec3b> src) {
-//	Mat_<Vec3b> dst = src.clone();
-//
-//}
+Mat_<Vec3b> padImage(Mat_<Vec3b> src) {
+	int rows = src.rows;
+	int cols = src.cols;
+	while (rows % BLOCK_SIZE != 0) rows++;
+	while (cols % BLOCK_SIZE != 0) cols++;
+	Mat_<Vec3b> dst(rows, cols);
 
-vector<Mat_<int>> getDivisionInBlocks(Mat_<uchar> img) {
+	for (int i = 0; i < src.rows; i++)
+		for (int j = 0; j < src.cols; j++)
+			dst(i, j) = src(i, j);
+
+	for (int i = src.rows; i < rows; i++)
+		for (int j = src.cols; j < cols; j++)
+			dst(i, j) = 0;
+
+	return dst;
+}
+
+vector<Mat_<int>> getDivisionInBlocks(Mat_<int> img) {
 	vector<Mat_<int>> pixels;
 
 	for (int i = 0; i < img.rows; i += BLOCK_SIZE)
 		for (int j = 0; j < img.cols; j += BLOCK_SIZE) {
-			Mat_<uchar> block(BLOCK_SIZE, BLOCK_SIZE);
+			Mat_<int> block(BLOCK_SIZE, BLOCK_SIZE);
 
 			for (int u = 0; u < BLOCK_SIZE; u++) {
 				int currentI = i + u;
@@ -92,8 +105,9 @@ Mat_<uchar> applyIDCT(Mat_<int> DCT) {
 		for (int j = 0; j < DCT.cols; j++) {
 			for (int x = 0; x < BLOCK_SIZE; x++)
 				for (int y = 0; y < BLOCK_SIZE; y++)
-					IDCT(i, j) += alpha(x) * alpha(y) * DCT(x, y) * cos(PI * (2 * i + 1) * x / (2 * BLOCK_SIZE))
-					* cos(PI * (2 * j + 1) * y / (2 * BLOCK_SIZE));
+					IDCT(i, j) += alpha(x) * alpha(y) * DCT(x, y) 
+								* cos(PI * (2 * i + 1) * x / (2 * BLOCK_SIZE))
+								* cos(PI * (2 * j + 1) * y / (2 * BLOCK_SIZE));
 		}
 
 	IDCT += 128;
@@ -207,7 +221,7 @@ vector<int> decodeRunLength(vector<int> rle) {
 	return decodedRLE;
 }
 
-vector<vector<int>> compressImageComponent(Mat_<uchar> component) {
+vector<vector<int>> compressImageComponent(Mat_<int> component) {
 	vector<Mat_<int>> blocks = getDivisionInBlocks(component);
 
 	vector<vector<int>> RLEs;
@@ -255,27 +269,93 @@ int main()
 	imgRows = src.rows;
 	imgCols = src.cols;
 
-	cout << "Original Size: " << imgRows * imgCols * 3 << endl;
+	cout << "Original Size: " << imgRows * imgCols << endl;
 
-	Mat_<uchar> Y(src.rows, src.cols), Cr(src.rows, src.cols), Cb(src.rows, src.cols);
-	Mat_<Vec3b> dst(src.rows, src.cols);
+	Mat_<Vec3b> padded = padImage(src);
+	Mat_<int> Y(padded.rows, padded.cols), Cr(padded.rows, padded.cols), Cb(padded.rows, padded.cols);
+	Mat_<Vec3b> dst(padded.rows, padded.cols);
 
-	cvtColor(src, dst, COLOR_BGR2YCrCb);
+	cvtColor(padded, dst, COLOR_BGR2YCrCb);
 	Mat channels[3];
 	split(dst, channels);
 	Y = channels[0];
 	Cr = channels[1];
 	Cb = channels[2];
+
 	vector<vector<int>> yRLEs = compressImageComponent(Y);
 	vector<vector<int>> crRLEs = compressImageComponent(Cr);
 	vector<vector<int>> cbRLEs = compressImageComponent(Cb);
 
-	int compressedSize = imgRows * imgCols + crRLEs.size() + cbRLEs.size();
+#pragma region FILE_WRITE
+	ofstream file;
+	file.open("img.txt");
+	file << padded.rows << " " << padded.cols << " ";
+
+	for (int i = 0; i < yRLEs.size(); i++) {
+		for (int j = 0; j < yRLEs[i].size(); j++)
+			file << yRLEs[i][j] << " ";
+		file << endl;
+	}
+	for (int i = 0; i < crRLEs.size(); i++) {
+		for (int j = 0; j < crRLEs[i].size(); j++)
+			file << crRLEs[i][j] << " ";
+		file << endl;
+	}
+	for (int i = 0; i < cbRLEs.size(); i++) {
+		for (int j = 0; j < cbRLEs[i].size(); j++)
+			file << cbRLEs[i][j] << " ";
+		file << endl;
+	}
+	file.close();
+#pragma endregion
+
+
+#pragma region FILE_READ
+	ifstream input;
+	input.open("img.txt");
+
+	int rows, cols;
+	input >> rows >> cols;
+
+	int blockNo = (rows / BLOCK_SIZE) * (cols / BLOCK_SIZE);
+	
+	vector<vector<int>> yRead, crRead, cbRead;
+	int x;
+	string  line;
+
+	for (int i = 0; i < blockNo; i++) {
+		vector<int> current;
+		getline(input, line);
+		stringstream linestream(line);
+		while (linestream >> x)
+			current.push_back(x);
+		yRead.push_back(current);
+	}
+	for (int i = 0; i < blockNo; i++) {
+		vector<int> current;
+		getline(input, line);
+		stringstream linestream(line);
+		while (linestream >> x)
+			current.push_back(x);
+		crRead.push_back(current);
+	}
+	for (int i = 0; i < blockNo; i++) {
+		vector<int> current;
+		getline(input, line);
+		stringstream linestream(line);
+		while (linestream >> x)
+			current.push_back(x);
+		cbRead.push_back(current);
+	}
+
+#pragma endregion
+
+	int compressedSize = yRLEs.size() + crRLEs.size() + cbRLEs.size();
 	cout << "Compressed size: " << compressedSize << endl;
 
-	Mat_<uchar> yReconstructed = reconstructImageComponent(yRLEs);
-	Mat_<uchar> crReconstructed = reconstructImageComponent(crRLEs);
-	Mat_<uchar> cbReconstructed = reconstructImageComponent(cbRLEs);
+	Mat_<uchar> yReconstructed = reconstructImageComponent(yRead);
+	Mat_<uchar> crReconstructed = reconstructImageComponent(crRead);
+	Mat_<uchar> cbReconstructed = reconstructImageComponent(cbRead);
 
 	channels[0] = yReconstructed;
 	channels[1] = crReconstructed;
